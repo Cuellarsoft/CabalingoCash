@@ -572,9 +572,11 @@ begin
   if cta.id is null then raise exception 'Cuenta no encontrada'; end if;
   if not public.hogar_activo() then raise exception 'Su suscripción no está vigente'; end if;
 
-  -- Primera importación de una cuenta bancaria: toma el "saldo anterior" como saldo inicial
-  if cta.tipo = 'banco' and (p_info->>'saldo_anterior') is not null
-     and not exists (select 1 from public.movimientos where cuenta_id = cta.id) then
+  -- Cuenta bancaria: el "saldo anterior" del extracto pasa a ser el saldo inicial si es la
+  -- primera planilla de la cuenta o si es de un período más antiguo que lo ya cargado
+  if cta.tipo = 'banco' and (p_info->>'saldo_anterior') is not null and (p_info->>'desde') is not null
+     and (not exists (select 1 from public.movimientos where cuenta_id = cta.id)
+          or (p_info->>'desde')::date < coalesce(cta.fecha_saldo_inicial, date '2999-12-31')) then
     update public.cuentas set saldo_inicial = (p_info->>'saldo_anterior')::numeric,
                               fecha_saldo_inicial = (p_info->>'desde')::date
      where id = cta.id;
@@ -644,6 +646,63 @@ begin
     'detalle', v_res);
 end $$;
 
+-- Borra una planilla importada y los movimientos que esa planilla agregó
+create or replace function public.eliminar_importacion(p_imp uuid) returns jsonb
+language plpgsql set search_path = public as $$
+declare
+  h uuid := public.mi_hogar();
+  imp public.importaciones; cta public.cuentas;
+  v_n int; v_suma numeric; v_quedan int;
+begin
+  select * into imp from public.importaciones where id = p_imp and hogar_id = h;
+  if imp.id is null then raise exception 'Planilla no encontrada'; end if;
+  if not public.hogar_activo() then raise exception 'Su suscripción no está vigente'; end if;
+  select * into cta from public.cuentas where id = imp.cuenta_id;
+
+  -- Traspasos creados automáticamente (por ejemplo, el ingreso en Efectivo de un retiro de cajero)
+  delete from public.movimientos
+   where hogar_id = h
+     and huella in (select 'espejo:' || id from public.movimientos where importacion_id = imp.id);
+
+  select count(*), coalesce(sum(monto_bs) filter (where fecha >= coalesce(cta.fecha_saldo_inicial, date '1900-01-01')), 0)
+    into v_n, v_suma
+    from public.movimientos where importacion_id = imp.id;
+
+  delete from public.movimientos where importacion_id = imp.id;
+  delete from public.importaciones where id = imp.id;
+
+  -- Ajusta el saldo inicial de la cuenta
+  select count(*) into v_quedan from public.movimientos where cuenta_id = cta.id;
+  if v_quedan = 0 and cta.modo = 'importacion' then
+    update public.cuentas set saldo_inicial = 0, fecha_saldo_inicial = null where id = cta.id;
+  elsif cta.fecha_saldo_inicial is not null and imp.desde is not null and imp.desde <= cta.fecha_saldo_inicial then
+    -- Era la planilla más antigua: el saldo base pasa al comienzo de lo que queda
+    update public.cuentas
+       set saldo_inicial = cta.saldo_inicial + v_suma,
+           fecha_saldo_inicial = (select min(fecha) from public.movimientos where cuenta_id = cta.id)
+     where id = cta.id;
+  end if;
+
+  return jsonb_build_object('movimientos', v_n);
+end $$;
+
+-- Borra TODOS los movimientos y planillas del hogar (pide escribir BORRAR para confirmar)
+create or replace function public.borrar_todos_los_movimientos(p_confirmacion text) returns jsonb
+language plpgsql set search_path = public as $$
+declare h uuid := public.mi_hogar(); v_m int; v_i int;
+begin
+  if p_confirmacion is distinct from 'BORRAR' then raise exception 'Escriba BORRAR para confirmar'; end if;
+  if not public.hogar_activo() then raise exception 'Su suscripción no está vigente'; end if;
+  delete from public.movimientos where hogar_id = h;
+  get diagnostics v_m = row_count;
+  delete from public.importaciones where hogar_id = h;
+  get diagnostics v_i = row_count;
+  update public.cuentas set saldo_inicial = 0, fecha_saldo_inicial = null where hogar_id = h and modo = 'importacion';
+  update public.reglas set veces = 0 where hogar_id = h;
+  update public.recurrentes set ultimo_pago = null where hogar_id = h;
+  return jsonb_build_object('movimientos', v_m, 'planillas', v_i);
+end $$;
+
 -- Saldo actual de cada cuenta (en tarjetas, negativo = deuda)
 create or replace function public.saldos_cuentas() returns table (cuenta_id uuid, saldo numeric)
 language sql stable set search_path = public as $$
@@ -692,23 +751,40 @@ end $$;
 -- ---------------------------------------------------------------
 -- 6. Tipo de cambio automático desde la página del BCB
 -- ---------------------------------------------------------------
+-- Lee el tipo de cambio ignorando estilos y programas de la página
 create or replace function public.leer_tc_de_texto(p_html text) returns numeric
 language plpgsql immutable as $$
-declare txt text; pos int; m text[]; v numeric;
+declare txt text; low text; pos int; desde int; m text[]; v numeric; etiqueta text;
 begin
-  txt := regexp_replace(coalesce(p_html, ''), '<[^>]+>', ' ', 'g');
+  txt := coalesce(p_html, '');
+  -- 1) quitar bloques <style>, <script> y comentarios (no son texto visible)
+  txt := regexp_replace(txt, '<style.*?</style>', ' ', 'gi');
+  txt := regexp_replace(txt, '<script.*?</script>', ' ', 'gi');
+  txt := regexp_replace(txt, '<!--.*?-->', ' ', 'g');
+  -- 2) quitar etiquetas y normalizar espacios
+  txt := regexp_replace(txt, '<[^>]+>', ' ', 'g');
   txt := replace(replace(replace(txt, '&nbsp;', ' '), '&oacute;', 'ó'), '&Oacute;', 'Ó');
   txt := regexp_replace(txt, '\s+', ' ', 'g');
-  pos := strpos(lower(txt), 'cambio oficial');
-  if pos = 0 then pos := strpos(lower(txt), 'bolivianos por d'); end if;
-  if pos = 0 then return null; end if;
-  m := regexp_match(substr(txt, pos, 700), '(?:^|[^0-9,.])([0-9]{1,3},[0-9]{2,4})(?![0-9])');
-  if m is null then return null; end if;
-  v := replace(m[1], ',', '.')::numeric;
-  if v < 3 or v > 100 then return null; end if;
-  return v;
+  low := lower(txt);
+  -- 3) probar cada aparición de las etiquetas hasta encontrar un valor válido
+  foreach etiqueta in array array['cambio oficial', 'bolivianos por d'] loop
+    desde := 1;
+    loop
+      pos := strpos(substr(low, desde), etiqueta);
+      exit when pos = 0;
+      pos := desde + pos - 1;
+      m := regexp_match(substr(txt, pos, 500), '(?:^|[^0-9,.])([0-9]{1,3},[0-9]{2,4})(?![0-9])');
+      if m is not null then
+        v := replace(m[1], ',', '.')::numeric;
+        if v between 3 and 100 then return v; end if;
+      end if;
+      desde := pos + length(etiqueta);
+    end loop;
+  end loop;
+  return null;
 end $$;
 
+-- Se identifica como navegador al leer la página
 create or replace function public.actualizar_tc_bcb() returns numeric
 language plpgsql security definer set search_path = public, extensions as $$
 declare resp extensions.http_response; v numeric;
@@ -716,6 +792,7 @@ declare resp extensions.http_response; v numeric;
 begin
   begin
     perform extensions.http_set_curlopt('CURLOPT_TIMEOUT', '25');
+    perform extensions.http_set_curlopt('CURLOPT_USERAGENT', 'Mozilla/5.0 (compatible; MisFinanzas/1.0)');
     select * into resp from extensions.http_get('https://www.bcb.gob.bo/');
   exception when others then
     raise warning 'No se pudo leer la página del BCB: %', sqlerrm;
@@ -755,7 +832,7 @@ do $$ declare f text; begin
     'public.emparejar_traspaso(uuid, uuid)', 'public.marcar_traspaso(uuid, uuid)', 'public.quitar_traspaso(uuid)',
     'public.procesar_pendientes()', 'public.importar_extracto(uuid, jsonb, jsonb)', 'public.saldos_cuentas()',
     'public.ajustar_saldo(uuid, numeric, date)', 'public.marcar_recurrente_pagado(uuid)', 'public.actualizar_tc_ahora()',
-    'public.recalcular_tc()']
+    'public.recalcular_tc()', 'public.eliminar_importacion(uuid)', 'public.borrar_todos_los_movimientos(text)']
   loop
     execute format('revoke execute on function %s from public, anon', f);
     execute format('grant execute on function %s to authenticated', f);

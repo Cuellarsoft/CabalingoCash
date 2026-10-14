@@ -1,13 +1,14 @@
 import { DragEvent, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, FileSpreadsheet, Upload } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, FileSpreadsheet, Trash2, Upload } from 'lucide-react';
 import { useApp } from '../context/App';
 import { leerExcel } from '../lib/excel';
 import { detectarFormato, FORMATOS, leerExtracto, ResultadoLectura } from '../lib/importadores';
 import { revisar, supabase } from '../lib/supabase';
 import type { Importacion } from '../lib/tipos';
 import { dinero, fechaCorta, numero } from '../lib/formato';
-import { Boton, Campo, Cargando, cx, Encabezado, Etiqueta, Selector, Tarjeta, Vacio } from '../components/ui';
+import { Boton, Campo, Cargando, cx, Encabezado, Etiqueta, Modal, Selector, Tarjeta, Vacio } from '../components/ui';
+import type { Cuenta } from '../lib/tipos';
 
 interface Resultado {
   filas: number; nuevos: number; duplicados: number; clasificados: number; pendientes: number;
@@ -26,10 +27,12 @@ export default function Importar() {
   const [resultado, setResultado] = useState<Resultado | null>(null);
   const [historial, setHistorial] = useState<Importacion[] | null>(null);
   const [arrastrando, setArrastrando] = useState(false);
+  const [borrar, setBorrar] = useState<Importacion | null>(null);
+  const [borrando, setBorrando] = useState(false);
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => { if (!cuentaId && importables[0]) setCuentaId(importables[0].id); }, [importables, cuentaId]);
-  const cargarHistorial = () => supabase.from('importaciones').select('*').order('creado_en', { ascending: false }).limit(20)
+  const cargarHistorial = () => supabase.from('importaciones').select('*').order('creado_en', { ascending: false }).limit(500)
     .then((r) => setHistorial((r.data as Importacion[]) || []));
   useEffect(() => { cargarHistorial(); }, []);
 
@@ -40,16 +43,31 @@ export default function Importar() {
     setError(''); setAviso(''); setLectura(null); setResultado(null); setLeyendo(true);
     try {
       const tabla = await leerExcel(f);
-      const det = detectarFormato(tabla);
-      if (det && det !== cuenta.formato) {
-        const otra = importables.find((c) => c.formato === det);
-        setAviso(`Este archivo parece de ${FORMATOS.find((x) => x.id === det)?.nombre}. ${otra ? `¿Quiso elegir "${otra.nombre}"?` : ''}`);
+      // El número de cuenta o tarjeta que dice el extracto decide en qué cuenta se carga
+      let destino: Cuenta = cuenta;
+      const cab = tabla.slice(0, 15).flat().map((c) => String(c ?? '')).join(' ');
+      const m = cab.match(/NRO\.?\s*(?:DE\s*)?(?:CUENTA|TARJETA)\s*:?\s*([0-9X][0-9X\-]{3,})/i);
+      if (m) {
+        const num = m[1].replace(/[^0-9]/g, '');
+        const coincide = (c: Cuenta) => !!c.numero && c.numero.length >= 4 && num.endsWith(c.numero.replace(/[^0-9]/g, ''));
+        if (!coincide(cuenta)) {
+          const otra = importables.find(coincide);
+          if (!otra) {
+            setError(`Este extracto es de la cuenta ${m[1]}, que no está registrada. Créela en Configuración → Cuentas (con ese número) o elija otro archivo.`);
+            return;
+          }
+          destino = otra;
+          setCuentaId(otra.id);
+          setAviso(`El extracto es de la cuenta ${m[1]}: se cargará en «${otra.nombre}» y no en «${cuenta.nombre}».`);
+        }
+      } else {
+        const det = detectarFormato(tabla);
+        if (det && det !== cuenta.formato) {
+          const otra = importables.find((c) => c.formato === det);
+          setAviso(`Este archivo parece de ${FORMATOS.find((x) => x.id === det)?.nombre}. ${otra ? `¿Quiso elegir "${otra.nombre}"?` : ''}`);
+        }
       }
-      const l = leerExtracto(cuenta.formato, tabla, f.name);
-      if (cuenta.numero && cuenta.tipo === 'banco') {
-        const cab = tabla.slice(0, 10).flat().map((c) => String(c ?? '')).join(' ');
-        if (/CUENTA/i.test(cab) && !cab.includes(cuenta.numero)) l.avisos.push(`El extracto no menciona el número ${cuenta.numero}. Verifique que eligió la cuenta correcta.`);
-      }
+      const l = leerExtracto(destino.formato || cuenta.formato, tabla, f.name);
       setLectura(l);
     } catch (e) {
       setError((e as Error).message);
@@ -69,6 +87,18 @@ export default function Importar() {
       tocar(); cargarHistorial();
     } catch (e) { avisar((e as Error).message, 'error'); }
     setSubiendo(false);
+  }
+
+  async function eliminarPlanilla() {
+    if (!borrar) return;
+    setBorrando(true);
+    try {
+      const r = revisar(await supabase.rpc('eliminar_importacion', { p_imp: borrar.id })) as { movimientos: number };
+      avisar(`Planilla borrada: ${r.movimientos} movimientos eliminados.`);
+      setBorrar(null); setResultado(null);
+      tocar(); cargarHistorial();
+    } catch (e) { avisar((e as Error).message, 'error'); }
+    setBorrando(false);
   }
 
   const soltar = (e: DragEvent) => { e.preventDefault(); setArrastrando(false); elegirArchivo(e.dataTransfer.files?.[0]); };
@@ -184,23 +214,44 @@ export default function Importar() {
           )}
         </div>
 
-        <Tarjeta titulo="Últimas importaciones">
-          {!historial ? <Cargando /> : historial.length === 0 ? <p className="text-sm text-tinta-suave">Todavía no importó extractos.</p> : (
-            <ul className="space-y-3 text-sm">
+        <Tarjeta titulo={`Planillas cargadas${historial?.length ? ` (${historial.length})` : ''}`}>
+          {!historial ? <Cargando /> : historial.length === 0 ? <p className="text-sm text-tinta-suave">Todavía no cargó planillas.</p> : (
+            <ul className="max-h-[36rem] space-y-3 overflow-y-auto pr-1 text-sm">
               {historial.map((h) => (
-                <li key={h.id} className="border-b border-black/5 pb-2 last:border-0">
-                  <div className="font-medium">{nombreCuenta(h.cuenta_id)}</div>
-                  <div className="text-xs text-tinta-suave">{fechaCorta(h.desde)} – {fechaCorta(h.hasta)}</div>
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    <Etiqueta color="verde">{h.nuevos} nuevos</Etiqueta>
-                    {h.duplicados > 0 && <Etiqueta>{h.duplicados} repetidos</Etiqueta>}
+                <li key={h.id} className="flex items-start justify-between gap-2 border-b border-black/5 pb-3 last:border-0">
+                  <div className="min-w-0">
+                    <div className="font-medium">{nombreCuenta(h.cuenta_id)}</div>
+                    <div className="truncate text-xs text-tinta-suave" title={h.archivo || ''}>{h.archivo || 'Sin nombre'}</div>
+                    <div className="text-xs text-tinta-suave">Período {fechaCorta(h.desde)} – {fechaCorta(h.hasta)} · cargada el {fechaCorta(h.creado_en)}</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      <Etiqueta color={h.nuevos > 0 ? 'verde' : 'gris'}>{h.nuevos} movimientos</Etiqueta>
+                      {h.duplicados > 0 && <Etiqueta>{h.duplicados} ya existían</Etiqueta>}
+                    </div>
                   </div>
+                  <button title="Borrar esta planilla" aria-label="Borrar esta planilla" disabled={!activa} onClick={() => setBorrar(h)}
+                    className="shrink-0 rounded-lg p-1.5 text-tinta-tenue hover:bg-red-50 hover:text-red-600 disabled:opacity-40">
+                    <Trash2 className="h-4 w-4" />
+                  </button>
                 </li>
               ))}
             </ul>
           )}
         </Tarjeta>
       </div>
+
+      <Modal abierto={!!borrar} cerrar={() => setBorrar(null)} titulo="Borrar planilla"
+        pie={<><Boton variante="secundario" onClick={() => setBorrar(null)}>Cancelar</Boton>
+          <Boton variante="peligro" onClick={eliminarPlanilla} cargando={borrando}>Borrar planilla</Boton></>}>
+        {borrar && (
+          <div className="space-y-3 text-sm">
+            <p><b>{nombreCuenta(borrar.cuenta_id)}</b> · {borrar.archivo || 'Sin nombre'}<br />
+              <span className="text-tinta-suave">Período {fechaCorta(borrar.desde)} – {fechaCorta(borrar.hasta)}</span></p>
+            <p>Se borrarán los <b>{borrar.nuevos} movimientos</b> que agregó esta planilla, con las categorías que les haya puesto.
+              Los movimientos que ya existían por otra planilla no se tocan.</p>
+            <p className="rounded-xl bg-red-50 px-3 py-2 text-red-800">Esto no se puede deshacer. Si se equivocó, puede volver a cargar el Excel.</p>
+          </div>
+        )}
+      </Modal>
     </>
   );
 }

@@ -131,7 +131,7 @@ export default function Reportes() {
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={porCategoria} layout="vertical" margin={{ left: 8, right: 16 }}>
                       <XAxis type="number" hide />
-                      <YAxis type="category" dataKey="nombre" width={130} tickLine={false} axisLine={false} fontSize={12} />
+                      <YAxis type="category" dataKey="nombre" width={160} tickLine={false} axisLine={false} fontSize={12} />
                       <Tooltip formatter={(v: number) => fmt(v)} cursor={{ fill: 'rgba(0,0,0,.04)' }} />
                       <Bar dataKey="valor" name="Gasto" radius={[0, 6, 6, 0]} maxBarSize={20}>
                         {porCategoria.map((c) => <Cell key={c.nombre} fill={c.color} />)}

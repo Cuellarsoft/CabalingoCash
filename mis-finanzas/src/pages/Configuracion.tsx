@@ -439,10 +439,39 @@ function Perfil() {
           <Boton onClick={cambiarClave}>Cambiar</Boton>
         </div>
       </Tarjeta>
+      <BorrarTodo />
       <Tarjeta titulo="Suscripción">
         <p className="text-sm">Plan <b>{suscripcion?.plan}</b> · estado <b>{suscripcion?.estado}</b> · vence {fechaCorta(suscripcion?.vence_el)}</p>
         {perfil?.es_superadmin && <p className="mt-2 text-xs text-tinta-suave">Usted es el administrador del sistema.</p>}
       </Tarjeta>
     </div>
+  );
+}
+
+// ------------------------------------------------------------- Borrar todo
+function BorrarTodo() {
+  const { avisar, tocar, recargar, activa } = useApp();
+  const [texto, setTexto] = useState('');
+  const [borrando, setBorrando] = useState(false);
+  async function borrar() {
+    setBorrando(true);
+    try {
+      const r = revisar(await supabase.rpc('borrar_todos_los_movimientos', { p_confirmacion: texto.trim().toUpperCase() })) as { movimientos: number; planillas: number };
+      avisar(`Se borraron ${r.movimientos} movimientos y ${r.planillas} planillas.`);
+      setTexto(''); await recargar(); tocar();
+    } catch (e) { avisar((e as Error).message, 'error'); }
+    setBorrando(false);
+  }
+  return (
+    <Tarjeta titulo="Empezar de cero" className="border-red-200">
+      <div className="space-y-3 text-sm">
+        <p className="text-tinta-suave">Borra <b className="text-tinta">todos</b> los movimientos y planillas cargadas. Se mantienen sus cuentas, categorías, reglas, presupuestos y pagos recurrentes.
+          Para borrar una sola planilla, use <b className="text-tinta">Importar extracto → Planillas cargadas</b>.</p>
+        <Campo etiqueta='Escriba BORRAR para confirmar'>
+          <Entrada value={texto} onChange={(e) => setTexto(e.target.value)} placeholder="BORRAR" autoComplete="off" />
+        </Campo>
+        <Boton variante="peligro" disabled={!activa || texto.trim().toUpperCase() !== 'BORRAR'} cargando={borrando} onClick={borrar}>Borrar todos los movimientos</Boton>
+      </div>
+    </Tarjeta>
   );
 }
