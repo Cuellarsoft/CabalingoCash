@@ -78,7 +78,7 @@ export default function Reportes() {
       await descargarExcel(`finanzas_${desde.slice(0, 7)}_a_${hasta.slice(0, 7)}.xlsx`, [
         { nombre: 'Resumen mensual', filas: evolucion.map((e) => ({ Mes: nombreMes(e.mes), [`Ingresos (${s})`]: e.ingresos, [`Gastos (${s})`]: e.gastos, [`Presupuesto (${s})`]: Math.round(e.presupuesto), [`Gasto en presupuesto (${s})`]: Math.round(e.gastoPres), [`Diferencia (${s})`]: Math.round(e.presupuesto - e.gastoPres) })) },
         { nombre: 'Por categoría', filas: porCategoria.map((c) => ({ Categoría: c.nombre, [`Gasto (${s})`]: c.valor })) },
-        { nombre: 'Movimientos', filas: movs.map((m) => ({
+        { nombre: 'Movimientos', filas: movs.filter((m) => m.clase !== 'excluido').map((m) => ({
           Fecha: fechaCorta(m.fecha), Cuenta: nombreCuenta(m.cuenta_id), Descripción: m.descripcion,
           Categoría: m.clase === 'traspaso' ? 'Traspaso' : m.clase === 'ajuste' ? 'Ajuste' : categoria(m.categoria_id)?.nombre || 'Sin clasificar',
           'Monto Bs': m.monto_bs, 'TC Bs/USD': m.tc_usd, 'Monto USD': m.tc_usd ? Math.round((m.monto_bs / m.tc_usd) * 100) / 100 : null,

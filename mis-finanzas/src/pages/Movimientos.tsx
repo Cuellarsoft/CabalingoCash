@@ -44,7 +44,8 @@ export default function Movimientos() {
     if (!movs) return [];
     const t = q.trim().toUpperCase();
     return movs.filter((m) => (!cuenta || m.cuenta_id === cuenta)
-      && (!cat || (cat === 'sin' ? !m.categoria_id && m.clase === 'normal' : cat === 'traspaso' ? m.clase === 'traspaso' : m.categoria_id === cat))
+      && (cat === 'eliminados' ? m.clase === 'excluido' : m.clase !== 'excluido')
+      && (!cat || cat === 'eliminados' || (cat === 'sin' ? !m.categoria_id && m.clase === 'normal' : cat === 'traspaso' ? m.clase === 'traspaso' : m.categoria_id === cat))
       && (!t || m.descripcion.toUpperCase().includes(t) || (m.nota || '').toUpperCase().includes(t)));
   }, [movs, q, cuenta, cat]);
 
@@ -89,12 +90,19 @@ export default function Movimientos() {
   }
 
   async function eliminar(m: Movimiento) {
-    if (!window.confirm('¿Eliminar este movimiento?')) return;
+    if (!window.confirm(m.importacion_id
+      ? '¿Eliminar este movimiento? Dejará de contar en gastos y reportes (podrá restaurarlo desde el filtro «Eliminados»).'
+      : '¿Eliminar este movimiento?')) return;
     try {
-      if (m.traspaso_par_id) revisar(await supabase.rpc('quitar_traspaso', { p_mov: m.id }));
-      revisar(await supabase.from('movimientos').delete().eq('id', m.id));
-      avisar('Movimiento eliminado.'); tocar();
+      const r = await D.eliminarMovimiento(m);
+      avisar(r === 'borrado' ? 'Movimiento eliminado.' : 'Movimiento eliminado. Puede restaurarlo con el filtro «Eliminados».');
+      tocar();
     } catch (e) { avisar((e as Error).message, 'error'); }
+  }
+
+  async function restaurar(m: Movimiento) {
+    try { await D.restaurarMovimiento(m); avisar('Movimiento restaurado: clasifíquelo de nuevo.'); tocar(); }
+    catch (e) { avisar((e as Error).message, 'error'); }
   }
 
   const gastos = categorias.filter((c) => c.activa && c.tipo === 'gasto');
@@ -103,6 +111,7 @@ export default function Movimientos() {
   const selectorCategoria = (m: Movimiento) => {
     if (m.clase === 'traspaso') return <Etiqueta color="azul"><ArrowLeftRight className="h-3 w-3" />Traspaso{m.traspaso_par_id ? ` · ${nombreCuenta(movs?.find((x) => x.id === m.traspaso_par_id)?.cuenta_id) !== '—' ? nombreCuenta(movs?.find((x) => x.id === m.traspaso_par_id)?.cuenta_id) : 'cuenta propia'}` : ' externo'}</Etiqueta>;
     if (m.clase === 'ajuste') return <Etiqueta>Ajuste de saldo</Etiqueta>;
+    if (m.clase === 'excluido') return <Etiqueta color="rojo">Eliminado</Etiqueta>;
     const c = categoria(m.categoria_id);
     return (
       <div className="flex items-center gap-1.5">
@@ -119,13 +128,17 @@ export default function Movimientos() {
     );
   };
 
-  const acciones = (m: Movimiento) => (
+  const acciones = (m: Movimiento) => m.clase === 'excluido' ? (
+    <div className="flex items-center justify-end">
+      <button title="Restaurar" onClick={() => restaurar(m)} className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-marca-700 hover:bg-marca-50"><Undo2 className="h-4 w-4" />Restaurar</button>
+    </div>
+  ) : (
     <div className="flex items-center justify-end gap-0.5">
       <button title="Editar" onClick={() => setEditar(m)} className="rounded-lg p-1.5 text-tinta-tenue hover:bg-black/5 hover:text-tinta"><Pencil className="h-4 w-4" /></button>
       {m.clase === 'traspaso'
         ? <button title="Quitar traspaso" onClick={() => quitarTraspaso(m)} className="rounded-lg p-1.5 text-tinta-tenue hover:bg-black/5 hover:text-tinta"><Undo2 className="h-4 w-4" /></button>
         : <button title="Marcar como traspaso" onClick={() => setTraspaso(m)} className="rounded-lg p-1.5 text-tinta-tenue hover:bg-black/5 hover:text-tinta"><ArrowLeftRight className="h-4 w-4" /></button>}
-      {!m.importacion_id && <button title="Eliminar" onClick={() => eliminar(m)} className="rounded-lg p-1.5 text-tinta-tenue hover:bg-red-50 hover:text-red-600"><Trash2 className="h-4 w-4" /></button>}
+      <button title="Eliminar" onClick={() => eliminar(m)} className="rounded-lg p-1.5 text-tinta-tenue hover:bg-red-50 hover:text-red-600"><Trash2 className="h-4 w-4" /></button>
     </div>
   );
 
@@ -163,6 +176,7 @@ export default function Movimientos() {
           <option value="">Todas las categorías</option>
           <option value="sin">Sin categoría</option>
           <option value="traspaso">Traspasos</option>
+          <option value="eliminados">Eliminados</option>
           {categorias.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
         </Selector>
       </div>

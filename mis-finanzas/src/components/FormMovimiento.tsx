@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../context/App';
 import { revisar, supabase } from '../lib/supabase';
+import { eliminarMovimiento } from '../lib/datos';
+import { Trash2 } from 'lucide-react';
 import type { Movimiento, Regla } from '../lib/tipos';
 import { hoy, numero } from '../lib/formato';
 import { aNumero } from '../lib/importadores';
@@ -26,11 +28,14 @@ export default function FormMovimiento({ abierto, cerrar, editar, alGuardar, cue
   const [reglas, setReglas] = useState<Regla[]>([]);
   const [guardando, setGuardando] = useState(false);
   const [catManual, setCatManual] = useState(false);
+  const [confirmarBorrar, setConfirmarBorrar] = useState(false);
+  const [borrando, setBorrando] = useState(false);
 
   const esImportado = !!editar?.importacion_id;
 
   useEffect(() => {
     if (!abierto) return;
+    setConfirmarBorrar(false);
     supabase.from('reglas').select('*').then((r) => setReglas((r.data as Regla[]) || []));
     if (editar) {
       setTipo(editar.clase === 'traspaso' ? 'traspaso' : editar.monto_bs < 0 ? 'gasto' : 'ingreso');
@@ -112,18 +117,58 @@ export default function FormMovimiento({ abierto, cerrar, editar, alGuardar, cue
     }
   }
 
+  async function borrar() {
+    if (!editar) return;
+    setBorrando(true);
+    try {
+      const r = await eliminarMovimiento(editar);
+      avisar(r === 'borrado' ? 'Movimiento eliminado.' : 'Movimiento eliminado. Puede restaurarlo en Movimientos → «Eliminados».');
+      tocar();
+      alGuardar?.();
+      cerrar();
+    } catch (e) {
+      avisar((e as Error).message, 'error');
+    } finally {
+      setBorrando(false);
+    }
+  }
+
   const titulo = editar ? 'Editar movimiento' : 'Nuevo movimiento';
+  const pie = editar && confirmarBorrar ? (
+    <>
+      <span className="mr-auto self-center text-sm text-red-700">¿Eliminar este movimiento?</span>
+      <Boton variante="secundario" onClick={() => setConfirmarBorrar(false)}>No</Boton>
+      <Boton variante="peligro" onClick={borrar} cargando={borrando}>Sí, eliminar</Boton>
+    </>
+  ) : (
+    <>
+      {editar && (
+        <Boton variante="fantasma" className="mr-auto text-red-600 hover:bg-red-50" onClick={() => setConfirmarBorrar(true)}>
+          <Trash2 className="h-4 w-4" />Eliminar
+        </Boton>
+      )}
+      <Boton variante="secundario" onClick={cerrar}>Cancelar</Boton>
+      <Boton onClick={guardar} cargando={guardando}>Guardar</Boton>
+    </>
+  );
   return (
     <Modal abierto={abierto} cerrar={cerrar} titulo={titulo}
-      pie={<><Boton variante="secundario" onClick={cerrar}>Cancelar</Boton><Boton onClick={guardar} cargando={guardando}>Guardar</Boton></>}>
+      pie={pie}>
       <div className="space-y-4">
         {!editar && (
           <Pestanas valor={tipo} cambiar={(t) => { setTipo(t); setCategoria(''); setCatManual(false); }}
             opciones={[{ id: 'gasto', nombre: 'Gasto' }, { id: 'ingreso', nombre: 'Ingreso' }, { id: 'traspaso', nombre: 'Traspaso' }]} />
         )}
-        {esImportado && (
+        {esImportado && !confirmarBorrar && (
           <p className="rounded-xl bg-sky-50 px-3 py-2 text-xs text-sky-800">
-            Este movimiento vino del extracto del banco: solo puede cambiar la categoría y la nota.
+            Este movimiento vino del extracto del banco: solo puede cambiar la categoría y la nota, o eliminarlo.
+          </p>
+        )}
+        {confirmarBorrar && (
+          <p className="rounded-xl bg-red-50 px-3 py-2 text-xs text-red-800">
+            {esImportado
+              ? 'Dejará de contar en sus gastos, presupuesto y reportes. Como vino del extracto del banco, queda guardado como «eliminado»: no vuelve a aparecer si importa el extracto otra vez y el saldo de la cuenta sigue cuadrando con el banco. Puede restaurarlo en Movimientos → filtro «Eliminados».'
+              : 'Se borrará definitivamente.'}
           </p>
         )}
         <div className="grid grid-cols-[1fr_auto] gap-2">

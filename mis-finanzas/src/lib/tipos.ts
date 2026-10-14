@@ -33,7 +33,7 @@ export interface Movimiento {
   hora: string | null;
   descripcion: string;
   monto_bs: number;
-  clase: 'normal' | 'traspaso' | 'ajuste';
+  clase: 'normal' | 'traspaso' | 'ajuste' | 'excluido';
   categoria_id: string | null;
   moneda_original: string;
   monto_original: number | null;

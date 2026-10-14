@@ -165,7 +165,7 @@ create table if not exists public.movimientos (
   hora            text,
   descripcion     text not null default '',
   monto_bs        numeric(14,2) not null,       -- negativo = sale dinero / sube deuda
-  clase           text not null default 'normal' check (clase in ('normal','traspaso','ajuste')),
+  clase           text not null default 'normal' check (clase in ('normal','traspaso','ajuste','excluido')),
   categoria_id    uuid references public.categorias(id) on delete set null,
   moneda_original text not null default 'BOB',
   monto_original  numeric(14,2),

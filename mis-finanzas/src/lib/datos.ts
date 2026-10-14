@@ -42,6 +42,31 @@ export async function movimientos(desde: string, hasta: string): Promise<Movimie
   return filas.map((m) => ({ ...m, monto_bs: Number(m.monto_bs), tc_usd: m.tc_usd ? Number(m.tc_usd) : null }));
 }
 
+/**
+ * Elimina un movimiento.
+ * - Cargado a mano: se borra.
+ * - Vino de un extracto: queda como «eliminado» (no cuenta en gastos ni reportes,
+ *   no vuelve a aparecer al importar de nuevo y el saldo del banco sigue cuadrando).
+ */
+export async function eliminarMovimiento(m: Movimiento): Promise<'borrado' | 'excluido'> {
+  if (m.traspaso_par_id) revisar(await supabase.rpc('quitar_traspaso', { p_mov: m.id }));
+  if (!m.importacion_id) {
+    revisar(await supabase.from('movimientos').delete().eq('id', m.id));
+    return 'borrado';
+  }
+  const r = await supabase.from('movimientos')
+    .update({ clase: 'excluido', estado: 'confirmado', categoria_id: null, traspaso_par_id: null }).eq('id', m.id);
+  if (r.error && /clase_check|check constraint/i.test(r.error.message)) {
+    throw new Error('Falta instalar en Supabase la actualización 05_eliminar_movimientos.sql.');
+  }
+  revisar(r);
+  return 'excluido';
+}
+
+export async function restaurarMovimiento(m: Movimiento) {
+  revisar(await supabase.from('movimientos').update({ clase: 'normal', estado: 'por_revisar' }).eq('id', m.id));
+}
+
 export async function recurrentes(): Promise<Recurrente[]> {
   const r = await supabase.from('recurrentes').select('*').order('proxima_fecha');
   return (revisar(r) as Recurrente[]) || [];
